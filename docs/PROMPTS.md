@@ -17,7 +17,7 @@ Registro de cómo se produjo cada parte con asistencia de IA. Los agentes, skill
 ## Paso 3 — Implementación (`implementer`)
 
 - 3a/3b: DTO y puerto ya existían de la base; se verificaron contra el análisis.
-- 3c (`openapi-first` + `java21-virtual-threads`): `config/ProductProperties`, `config/RestClientConfig` (pool 200, 500/2000ms), `exception/*`, `infrastructure/rest/RestProductClient` (normalización, 404→vacío, caché Caffeine de éxitos).
+- 3c (`openapi-first` + `java21-virtual-threads`): `config/ProductProperties`, `config/RestClientConfig` (pool 600 —subido desde 200 tras medir cola bajo 200 VUs, ver paso 8—, 500/2000ms), `exception/*`, `infrastructure/rest/RestProductClient` (normalización, 404→vacío, caché Caffeine de éxitos).
   - Verificación: `RestProductClientTest` (7 tests WireMock standalone) en verde. Incidencia: `org.wiremock:wiremock` modular falla sin Jetty → se cambió a `wiremock-standalone:3.9.1`.
 - 3d (`java21-virtual-threads` + `resilience-filter-timeout`): `service/SimilarService` (fan-out virtual + `orTimeout` + filtrado + orden + dedupe + log por agregación).
   - Verificación: `SimilarServiceTest` (5 tests Mockito) en verde.
@@ -43,7 +43,13 @@ Registro de cómo se produjo cada parte con asistencia de IA. Los agentes, skill
 
 ## Paso 7 — Mejoras
 
-- Caché manual eliminada: `config/CacheConfig` (`CaffeineCacheManager`) + `@Cacheable("details")` en `getProduct` (los vacíos no se cachean). Incidencia: el `unless` con `#result.isEmpty()` falla porque Spring desempaqueta el `Optional` → se dejó `unless = "#result == null"`. Nuevo `RestProductClientCacheTest` con `@SpringBootTest` + `DynamicPropertySource` que verifica 1 sola llamada aguas abajo.
+- Caché manual eliminada: `config/CacheConfig` (`CaffeineCacheManager`) + `@Cacheable("details")` en `getProduct` (los vacíos no se cachean). Incidencia: el `unless` con `#result.isEmpty()` falla porque Spring desempaqueta el `Optional` → se dejó `unless = "#result == null"`. `RestProductClientCacheTest` con `@SpringBootTest` + `DynamicPropertySource`: éxitos con 1 sola llamada aguas abajo y vacíos sin cachear con 2 llamadas (`emptyResultIsNotCached`).
 - Executor virtual como bean (`config/TaskExecutorConfig`, `destroyMethod="close"`) inyectado en `SimilarService`; se mantiene el constructor de test. Cierra la limitación anotada en el paso 6.
 - Spotless (`palantirJavaFormat`) con `check` en `verify`.
-- Verificación final: `mvn clean verify` en verde (23 tests, 0 fallos, sin avisos de deprecación).
+- Verificación final: `mvn clean verify` en verde (24 tests, 0 fallos, sin avisos de deprecación).
+
+## Paso 8 — Ajuste de pool bajo carga (`perf-tuner` + `k6-verify`)
+
+- Hallazgo: con `max-connections: 200`, el run completo de `k6/test.js` daba en `verySlow` med 3.48s / p95 4.02s (el doble del timeout de 2s) + 3×502. Causa: 200 VUs × 3 detalles en fan-out = 600 conexiones concurrentes contra un pool de 200 → cola en `connectionRequestTimeout`.
+- Cambio: `application.yaml` → `max-connections: 600` (+ justificación en `docs/01 §4`).
+- Verificación: run aislado `GET /product/3/similar` (200 VUs, 15s, script temporal borrado tras medir): med 2.02s, p95 2.81s (< 3s), max 2.91s, 1200/1200 → 200, 0 interrumpidas.
